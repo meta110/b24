@@ -1,0 +1,133 @@
+let
+oBatch = ( chain as text, optional connection as text, optional id as any ) =>
+	let
+		//chain = "crm.deal.list?filter[>DATE_CREATE]=2019-09-19T00:00:00",
+		//chain = "department.get",
+		//chain = "crm.deal.list?filter[>DATE_CREATE]=2019-03-15T00:00:00&filter[<DATE_CREATE]=2019-03-18T00:00:00",
+		//chain = "crm.deal.list?filter[>DATE_CREATE]=2019-09-20T00:00:00&filter[<DATE_CREATE]=2019-09-30T00:00:00&select[]", //фильтр в промежутке дат с возвратом только ID
+		//chain = "crm.dealcategory.stage.list?id=5",
+        //chain = "crm.dealcategory.list",
+        //chain = "crm.deal.get?id=1529",
+		///chain = "crm.deal.get?id=",
+		//ids = #"Invoked Function (2)",//{1529,2227},
+		//ids = null,
+
+		//Text.Format("crm.lead.list?filter[>DATE_CREATE]=#[from]&filter[<DATE_CREATE]=#[to]&filter[SOURCE_ID]=OTHER&select[]=ID&select[]=TITLE&select[]=COMPANY_ID&select[]=CONTACT_ID&select[]=SOURCE_ID&select[]=SOURCE_DESCRIPTION&select[]=STATUS_ID&select[]=ASSIGNED_BY_ID&select[]=DATE_CREATE&select[]=STATUS_SEMANTIC_ID&select[]=ADDRESS_PROVINCE", [from = DateTime.ToText(begin,"yyyy-MM-ddT00:00:00"), to = DateTime.ToText(today,"yyyy-MM-ddT00:00:00")])
+
+	// настройки постоянного подключения
+    connection = if connection = null then [ 
+        protocol = "https:",
+        rest    = "rest",
+        domain  = "profence.bitrix24.ru",
+        user    = "1184",
+        secret  = "8t54jhckc1pt2src"
+    ] else [
+        source  = Text.Split(connection, "/"),
+        protocol = source{0},
+        domain  = source{2},
+        rest    = source{3},
+        user    = source{4},
+        secret  = source{5}
+    ],
+    url = Text.Combine({
+        connection[protocol]&"/",
+        connection[domain],
+        connection[rest],
+        connection[user],
+        connection[secret],
+        "batch.json"
+    }, "/"),
+ 
+    // разбор идентификаторов
+    ids = 
+        if id = null then null
+        else if id = false then false
+		else if Value.Is(id, type list) then id
+        else if Value.Is(id, type text) then List.Select(List.Transform(Text.SplitAny(id,".,; "), Number.ExtractInt), each _ > 0)
+        else null,
+    Number.ExtractInt = (text as text) => let // извлекает целые числа из любой строки
+        symbols = Text.ToList(text),
+        check_numbers = List.Transform(symbols ,each if Value.Is(Value.FromText(_), type number) then _ else null),
+        only_numbers = List.RemoveNulls(check_numbers),
+        numb = Number.FromText(Text.Combine(only_numbers))
+    in 
+        numb,            
+		
+	//b24 limits
+		max_results = 50, // возвращает не больше 50 строк за раз
+		max_chain_links = 50, // не более 50 запросов в цепочке
+
+		//main request
+		batch = (query as record) => 
+			Json.Document(
+				Text.FromBinary( //костыль, т.к. парсер Power Pivot иногда не может распарсить JSON и выдает ошибку
+					Web.Contents( url, [ Query = query ] ) 
+				),
+				TextEncoding.Utf8
+			),
+
+		res2 = batch(makeName(chain))[result],
+		total3 = getNext(res2,"result_total"),
+		next3 = getNext(res2),
+		chain_group3 = (List.Generate(()=>next3, each _ < total3, each _ + max_results, each chain & "&start=" & Text.From(_))),
+
+		// заменяю все символы кроме латинских букв и цифр на нижнее подчеркивание
+		charsnumbers = {"a".."z"} & {"A".."Z"} & {"0".."9"},
+		makeName = ( str as text ) => 
+		let
+			name = Text.Combine(
+				List.Transform(
+					Text.ToList(str), 
+					each if List.Contains(charsnumbers,_) then _ else "_"
+				)
+			)
+		in 
+			Record.AddField(
+				[],
+				Text.Format("cmd[#[cmd]]", [ cmd = name ]),
+				str
+			),
+
+		list_query = if ids <> null
+		then List.Transform(ids, each makeName(chain & Text.From(_))) 
+		else List.Transform(
+			chain_group3, 
+			each makeName(_)
+		),
+		
+		// Б24 возвращает ошибку 414 Request-URI Too Large. Примерно оценил длину, которую он принимает. Если ошибка повторится - уменьшить
+		max_part_size = Number.RoundDown(3000 / Text.Length(chain)),
+		shorten_uri = if max_part_size < max_chain_links then max_part_size else max_chain_links,
+		
+		split_query = List.Transform(List.Generate(()=>0, each _ < List.Count(list_query), each _ + shorten_uri), each Record.Combine(List.Range(list_query,_,shorten_uri))),
+		rest_results2 = List.Transform(split_query, each batch(_)[result][result]),
+		query2 = Record.Combine(list_query),
+		
+		rest_results = Record.Combine(rest_results2), 
+        
+		unpack_result = 
+            if ids <> null and ids <> false then rest_results 
+            else if (total3 = null or next3 = null or ids = false) then res2[result] 
+            else Record.Combine({res2[result], rest_results}),
+		res_values = Record.FieldValues(unpack_result),
+		is_record = Value.Is(res_values{0},type record),
+		len = List.Count(res_values),
+		comb1 = if (len = 1 and is_record ) or (ids <> null and ids <> false and not(Value.Is(res_values{0},type list))) then res_values else List.Combine(res_values), //в условии костыль с проверкой типа список
+	
+	getNext = (rec, optional field) => let next = if field = null then rec[result_next] else Record.Field(rec,field) in if Value.Type(next) = type list and List.IsEmpty(next) then null else Record.FieldValues(next){0},
+
+	parts_combined = comb1,
+	
+	col_names = List.Distinct(List.Combine(
+        List.Transform(
+            List.FirstN(parts_combined, max_results), 
+            Record.FieldNames
+        )
+    )),
+	tabl = 
+        if ids = null and Value.Type(res2[result]) = type list and List.IsEmpty(res2[result]) then null 
+        else Table.FromRecords(parts_combined,col_names,MissingField.UseNull) 
+in
+    tabl meta [ result_total = total3, col_names = col_names ]
+in
+oBatch
