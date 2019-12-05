@@ -18,9 +18,9 @@ oBatch = ( chain as text, optional connection as text, optional id as any ) =>
     connection = if connection = null then [ 
         protocol = "https:",
         rest    = "rest",
-        domain  = "profence.bitrix24.ru",
-        user    = "1184",
-        secret  = "8t54jhckc1pt2src"
+        domain  = "АДРЕС ВАШЕГО БИТРИКС.bitrix24.ru",
+        user    = "ИДЕНТИФИКАТОР ПОЛЬЗОВАТЕЛЯ - ВЛАДЕЛЬЦА ВЕБХУКА",
+        secret  = "КЛЮЧ ДЛЯ ПОДКЛЮЧЕНИЯ"
     ] else [
         source  = Text.Split(connection, "/"),
         protocol = source{0},
